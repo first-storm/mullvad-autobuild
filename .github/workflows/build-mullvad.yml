@@ -1,0 +1,173 @@
+name: Build Mullvad RPMs
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Which channel to build
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - stable
+          - beta
+          - main
+      force:
+        description: Rebuild even if the upstream ref has not changed
+        required: false
+        default: false
+        type: boolean
+      manual_ref:
+        description: Optional tag, branch, or commit to build manually
+        required: false
+        default: ""
+        type: string
+      manual_ref_type:
+        description: How to interpret manual_ref
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - tag
+          - commit
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mullvad-autobuild
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      count: ${{ steps.resolve.outputs.count }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve build targets
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_CHANNEL: ${{ github.event.inputs.channel || 'all' }}
+          INPUT_FORCE: ${{ github.event.inputs.force || 'false' }}
+          INPUT_MANUAL_REF: ${{ github.event.inputs.manual_ref || '' }}
+          INPUT_MANUAL_REF_TYPE: ${{ github.event.inputs.manual_ref_type || 'auto' }}
+          TARGET_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          matrix_json="$(
+            bash scripts/resolve-targets.sh \
+              --channel "$INPUT_CHANNEL" \
+              --force "$INPUT_FORCE" \
+              --manual-ref "$INPUT_MANUAL_REF" \
+              --manual-ref-type "$INPUT_MANUAL_REF_TYPE" \
+              --repo "$TARGET_REPOSITORY"
+          )"
+
+          echo "Resolved matrix: $matrix_json"
+          count="$(jq 'length' <<<"$matrix_json")"
+
+          {
+            echo 'matrix<<EOF'
+            echo "$matrix_json"
+            echo 'EOF'
+            echo "count=$count"
+          } >>"$GITHUB_OUTPUT"
+
+  build-and-publish:
+    needs: prepare
+    if: needs.prepare.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21.13"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: /tmp/mullvadvpn-app
+
+      - name: Install system dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            curl \
+            git \
+            jq \
+            gcc \
+            libdbus-1-dev \
+            podman \
+            protobuf-compiler \
+            rpm \
+            ruby \
+            ruby-dev
+          sudo gem install --no-document fpm
+
+      - name: Build RPM
+        env:
+          CHANNEL: ${{ matrix.channel }}
+          REF_TYPE: ${{ matrix.ref_type }}
+          UPSTREAM_REF: ${{ matrix.upstream_ref }}
+          UPSTREAM_SHA: ${{ matrix.upstream_sha }}
+          SOURCE_URL: ${{ matrix.source_url }}
+          RELEASE_TAG: ${{ matrix.release_tag }}
+          RELEASE_NAME: ${{ matrix.release_name }}
+          OUTPUT_DIR: ${{ runner.temp }}/build-output
+        run: |
+          set -euo pipefail
+          bash scripts/build-one.sh \
+            --channel "$CHANNEL" \
+            --ref-type "$REF_TYPE" \
+            --upstream-ref "$UPSTREAM_REF" \
+            --upstream-sha "$UPSTREAM_SHA" \
+            --source-url "$SOURCE_URL" \
+            --release-tag "$RELEASE_TAG" \
+            --release-name "$RELEASE_NAME" \
+            --output-dir "$OUTPUT_DIR"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_REPOSITORY: ${{ github.repository }}
+          OUTPUT_DIR: ${{ runner.temp }}/build-output
+        run: |
+          set -euo pipefail
+          bash scripts/publish-release.sh \
+            --repo "$TARGET_REPOSITORY" \
+            --metadata "$OUTPUT_DIR/metadata.json"
+
+  no-op:
+    needs: prepare
+    if: needs.prepare.outputs.count == '0'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Nothing to build
+        run: echo "All requested channels are already up to date."
