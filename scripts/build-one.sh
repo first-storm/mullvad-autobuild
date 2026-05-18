@@ -94,7 +94,7 @@ echo "Checking out $checkout_target"
 git checkout --detach "$checkout_target"
 
 echo "Fetching required submodules"
-git submodule update --init --depth 1 dist-assets/binaries wireguard-go-rs/libwg/wireguard-go
+git submodule update --init --depth 1
 
 if [[ -x "./scripts/setup-rust" ]]; then
   echo "Preparing Rust toolchain"
