@@ -80,8 +80,12 @@ trap 'rm -f "$notes_file"' EXIT
 echo "Publishing $artifact_name to release $release_tag in $TARGET_REPO"
 
 if gh release view "$release_tag" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+  # Upload the new asset first so a failure never leaves the release empty,
+  # and update the notes last: resolve-targets.sh reads them to decide skips.
+  gh release upload "$release_tag" "$artifact_path" --repo "$TARGET_REPO" --clobber
+
   while IFS= read -r old_asset; do
-    [[ -n "$old_asset" ]] || continue
+    [[ -n "$old_asset" && "$old_asset" != "$artifact_name" ]] || continue
     gh release delete-asset "$release_tag" "$old_asset" --repo "$TARGET_REPO" --yes
   done < <(
     gh release view "$release_tag" \
@@ -101,7 +105,4 @@ else
     --target "${GITHUB_SHA:-HEAD}" \
     --title "$release_name" \
     --notes-file "$notes_file"
-  exit 0
 fi
-
-gh release upload "$release_tag" "$artifact_path" --repo "$TARGET_REPO" --clobber

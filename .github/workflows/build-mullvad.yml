@@ -109,10 +109,19 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # The source tree lives at a fixed path (see --work-dir below) so the
+      # Rust target dir can be restored into it. Keys follow the upstream ref,
+      # falling back to the latest cache of the same channel.
       - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+        uses: actions/cache@v4
         with:
-          workspaces: /tmp/mullvadvpn-app
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/work/mullvadvpn-app/target
+          key: rust-${{ matrix.channel }}-${{ matrix.upstream_sha || matrix.upstream_ref }}
+          restore-keys: |
+            rust-${{ matrix.channel }}-
 
       - name: Install system dependencies
         run: |
@@ -141,6 +150,7 @@ jobs:
           RELEASE_TAG: ${{ matrix.release_tag }}
           RELEASE_NAME: ${{ matrix.release_name }}
           OUTPUT_DIR: ${{ runner.temp }}/build-output
+          WORK_DIR: ${{ runner.temp }}/work
         run: |
           set -euo pipefail
           bash scripts/build-one.sh \
@@ -151,7 +161,8 @@ jobs:
             --source-url "$SOURCE_URL" \
             --release-tag "$RELEASE_TAG" \
             --release-name "$RELEASE_NAME" \
-            --output-dir "$OUTPUT_DIR"
+            --output-dir "$OUTPUT_DIR" \
+            --work-dir "$WORK_DIR"
 
       - name: Publish release
         env:

@@ -10,11 +10,12 @@ SOURCE_URL=""
 RELEASE_TAG=""
 RELEASE_NAME=""
 OUTPUT_DIR=""
+WORK_DIR=""
 UPSTREAM_REPO_URL="https://github.com/mullvad/mullvadvpn-app.git"
 
 usage() {
   cat <<'EOF'
-Usage: build-one.sh --channel CHANNEL --ref-type tag|commit --upstream-ref REF --upstream-sha SHA --source-url URL --release-tag TAG --release-name NAME --output-dir DIR
+Usage: build-one.sh --channel CHANNEL --ref-type tag|commit --upstream-ref REF --upstream-sha SHA --source-url URL --release-tag TAG --release-name NAME --output-dir DIR [--work-dir DIR]
 EOF
 }
 
@@ -52,6 +53,10 @@ while [[ $# -gt 0 ]]; do
       OUTPUT_DIR="${2:-}"
       shift 2
       ;;
+    --work-dir)
+      WORK_DIR="${2:-}"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -71,30 +76,43 @@ for required in CHANNEL REF_TYPE UPSTREAM_REF SOURCE_URL RELEASE_TAG RELEASE_NAM
   fi
 done
 
-workdir="$(mktemp -d)"
+# A caller-supplied work dir keeps a stable source path so build caches
+# (e.g. the Rust target dir) can be restored into it between runs.
+if [[ -n "$WORK_DIR" ]]; then
+  workdir="$WORK_DIR"
+  mkdir -p "$workdir"
+else
+  workdir="$(mktemp -d)"
+  cleanup() {
+    rm -rf "$workdir"
+  }
+  trap cleanup EXIT
+fi
 src_dir="$workdir/mullvadvpn-app"
 
-cleanup() {
-  rm -rf "$workdir"
-}
-
-trap cleanup EXIT
-
-echo "Cloning upstream repository into $src_dir"
-git clone --filter=blob:none "$UPSTREAM_REPO_URL" "$src_dir"
-
-cd "$src_dir"
-
-checkout_target="$UPSTREAM_REF"
+fetch_target="$UPSTREAM_REF"
 if [[ "$REF_TYPE" == "commit" && -n "$UPSTREAM_SHA" ]]; then
-  checkout_target="$UPSTREAM_SHA"
+  fetch_target="$UPSTREAM_SHA"
 fi
 
-echo "Checking out $checkout_target"
-git checkout --detach "$checkout_target"
+# Shallow-fetch just the needed ref. `git init` + `fetch` (instead of `clone`)
+# also works when the cache has already populated target/ inside src_dir.
+echo "Fetching $fetch_target into $src_dir"
+mkdir -p "$src_dir"
+cd "$src_dir"
+git init --quiet
+git remote remove origin 2>/dev/null || true
+git remote add origin "$UPSTREAM_REPO_URL"
+if [[ "$REF_TYPE" == "tag" ]]; then
+  git fetch --quiet --depth 1 origin "refs/tags/${fetch_target}:refs/tags/${fetch_target}"
+  git checkout --quiet --force --detach "refs/tags/${fetch_target}"
+else
+  git fetch --quiet --depth 1 origin "$fetch_target"
+  git checkout --quiet --force --detach FETCH_HEAD
+fi
 
 echo "Fetching required submodules"
-git submodule update --init --depth 1
+git submodule update --init --depth 1 --jobs 4
 
 if [[ -x "./scripts/setup-rust" ]]; then
   echo "Preparing Rust toolchain"
